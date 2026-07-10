@@ -1,0 +1,60 @@
+# ============================================================
+# News sources configuration
+# ============================================================
+
+rss_feeds:
+  - name: netkeiba
+    url: "https://www.netkeiba.com/?pid=news_rss"
+    category_id: 1   # Replace with your WP category ID
+
+  - name: jra_official
+    url: "https://www.jra.go.jp/news/rss.xml"
+    category_id: 2   # Replace with your WP category ID
+
+  - name: sports_navi_keiba
+    # Verify this URL is current; Yahoo RSS endpoints sometimes change
+    url: "https://sports.yahoo.co.jp/rss/horse/feed.xml"
+    category_id: 1
+
+# ============================================================
+# HTML scrape sources (for sites without RSS)
+# Adjust CSS selectors to match the site's actual HTML structure.
+# ============================================================
+
+scrape_sources:
+  - name: tospo_keiba
+    list_url: "https://www.tokyo-sports.co.jp/category/horse-racing/"
+    category_id: 1
+    # CSS selector for each article card on the list page
+    article_selector: "article"
+    # Selector for the title element, relative to article_selector
+    title_selector: "h2, h3, .entry-title"
+    # Selector for the link element, relative to article_selector
+    link_selector: "a"
+    # Optional: CSS selector for article body on detail page.
+    # Set to null to use only the title (faster, less scraping).
+    body_selector: null
+    # Polite delay between HTTP requests (seconds)
+    request_delay: 3.0
+
+# ============================================================
+# Featured image mapping: WP category ID → WP media ID
+# Upload placeholder images to WP Media Library first,
+# then paste the returned media IDs here.
+# ============================================================
+
+category_image_map:
+  1: 100   # e.g. race results image
+  2: 101   # e.g. JRA official image
+
+# ============================================================
+# WordPress defaults
+# ============================================================
+
+wordpress:
+  # "draft" = save as draft (recommended until AI output is verified)
+  # "publish" = go live immediately
+  default_status: "draft"
+  default_category_id: 1
+  # Fallback media ID when category has no specific mapping
+  default_featured_media_id: 100
