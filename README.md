@@ -12,7 +12,7 @@ RSS / Scrape → 重複排除 → AI リライト → WordPress REST API
 
 ```bash
 # 1. 仮想環境を作成して有効化
-python3 -m venv .venv
+python -m venv .venv
 source .venv/bin/activate
 
 # 2. 依存パッケージをインストール
@@ -26,7 +26,7 @@ cp .env.example .env
 nano config/sources.yaml
 
 # 5. 接続確認
-python3 check_setup.py
+python check_setup.py
 ```
 
 ---
@@ -35,10 +35,10 @@ python3 check_setup.py
 
 ```bash
 # テスト実行（WordPress への投稿なし）
-python3 run.py --dry-run
+python run.py --dry-run
 
 # 本番実行
-python3 run.py
+python run.py
 ```
 
 ---
@@ -50,5 +50,5 @@ crontab -e
 ```
 
 ```
-*/30 * * * * cd /home/youruser/horse-racing-news-bot && .venv/bin/python3 run.py >> logs/cron.log 2>&1
+*/30 * * * * cd /home/youruser/horse-racing-news-bot && .venv/bin/python run.py >> logs/cron.log 2>&1
 ```
