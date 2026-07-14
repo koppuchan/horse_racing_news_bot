@@ -8,6 +8,10 @@ Authentication: Application Password (built into WP 5.6+).
 
 The generated password (with spaces) is passed as HTTP Basic Auth.
 httpx handles encoding automatically.
+
+Post target: custom post type "keiba_news"
+  Endpoint: /wp-json/wp/v2/keiba_news
+  (The custom post type must be registered with show_in_rest=True)
 """
 
 import logging
@@ -21,10 +25,16 @@ _TIMEOUT = 30   # seconds per request
 
 
 class WordPressClient:
-    def __init__(self, base_url: str, username: str, app_password: str) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        username: str,
+        app_password: str,
+        post_type: str = "horse_racing_news",
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api = f"{self.base_url}/wp-json/wp/v2"
-        # httpx Basic Auth encodes username:password in the Authorization header
+        self.post_type = post_type          # custom post type slug
         self._auth = (username, app_password)
 
     def _client(self) -> httpx.Client:
@@ -96,12 +106,14 @@ class WordPressClient:
         if tags:
             payload["tags"] = tags
 
+        endpoint = f"{self.api}/{self.post_type}"
         try:
             with self._client() as client:
-                resp = client.post(f"{self.api}/posts", json=payload)
+                resp = client.post(endpoint, json=payload)
             resp.raise_for_status()
-            post_id: int = resp.json()["id"]
-            post_url: str = resp.json().get("link", "")
+            data = resp.json()
+            post_id: int = data["id"]
+            post_url: str = data.get("link", "")
             logger.info(
                 "[WP] Post created: ID=%d status=%s url=%s | %s",
                 post_id, status, post_url, title[:60],
@@ -122,6 +134,25 @@ class WordPressClient:
 
     # ── Diagnostic helpers ─────────────────────────────────────────────────────
 
+    def verify_post_type(self) -> bool:
+        """Check that the custom post type REST endpoint is accessible."""
+        endpoint = f"{self.api}/{self.post_type}"
+        try:
+            with self._client() as client:
+                resp = client.get(endpoint, params={"per_page": 1})
+            if resp.status_code in (200, 401):
+                # 401 means endpoint exists but needs auth — that's fine here
+                logger.info("[WP] Custom post type endpoint OK: %s", endpoint)
+                return True
+            logger.error(
+                "[WP] Custom post type endpoint returned HTTP %d: %s",
+                resp.status_code, endpoint,
+            )
+            return False
+        except Exception as exc:
+            logger.error("[WP] Cannot reach %s: %s", endpoint, exc)
+            return False
+
     def list_categories(self) -> list[dict]:
         """Fetch all categories — useful for finding the right category IDs."""
         try:
@@ -132,42 +163,3 @@ class WordPressClient:
         except Exception as exc:
             logger.error("[WP] Failed to fetch categories: %s", exc)
             return []
-
-    def upload_image(self, file_path: str, alt_text: str = "") -> Optional[int]:
-        """
-        Upload a local image file to the WP media library.
-        Returns the media ID on success.
-
-        Use this once per category image during initial setup — then store
-        the returned IDs in config/sources.yaml under category_image_map.
-        """
-        import mimetypes
-        from pathlib import Path
-
-        path = Path(file_path)
-        mime = mimetypes.guess_type(str(path))[0] or "image/jpeg"
-
-        try:
-            with self._client() as client:
-                with open(path, "rb") as f:
-                    resp = client.post(
-                        f"{self.api}/media",
-                        content=f.read(),
-                        headers={
-                            "Content-Type": mime,
-                            "Content-Disposition": f'attachment; filename="{path.name}"',
-                        },
-                    )
-            resp.raise_for_status()
-            media_id: int = resp.json()["id"]
-            if alt_text:
-                with self._client() as client:
-                    client.post(
-                        f"{self.api}/media/{media_id}",
-                        json={"alt_text": alt_text},
-                    )
-            logger.info("[WP] Uploaded image: ID=%d (%s)", media_id, path.name)
-            return media_id
-        except Exception as exc:
-            logger.error("[WP] Failed to upload %s: %s", file_path, exc)
-            return None

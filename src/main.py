@@ -97,23 +97,34 @@ def run(dry_run: bool = False) -> None:
     if dry_run:
         logger.info("=== DRY RUN MODE — no posts will be published ===")
 
-    env = _require_env(["OPENAI_API_KEY", "WP_BASE_URL", "WP_USERNAME", "WP_APP_PASSWORD"])
+    env = _require_env(["GEMINI_API_KEY", "WP_BASE_URL", "WP_USERNAME", "WP_APP_PASSWORD"])
     config = _load_config()
     wp_config: dict = config.get("wordpress", {})
     post_status: str = wp_config.get("default_status", "draft")
 
     # ── Service init ───────────────────────────────────────────────────────────
     db = Database(_PROJECT_ROOT / "data" / "seen_articles.db")
-    rewriter = Rewriter(api_key=env["OPENAI_API_KEY"])
+    gemini_model = config.get("gemini", {}).get("model", "gemini-flash-lite-latest")
+    rewriter = Rewriter(api_key=env["GEMINI_API_KEY"], model=gemini_model)
+    post_type = wp_config.get("post_type", "keiba_news")
     wp = WordPressClient(
         base_url=env["WP_BASE_URL"],
         username=env["WP_USERNAME"],
         app_password=env["WP_APP_PASSWORD"],
+        post_type=post_type,
     )
 
-    if not dry_run and not wp.verify_connection():
-        logger.critical("WordPress connection failed. Aborting run.")
-        sys.exit(1)
+    if not dry_run:
+        if not wp.verify_connection():
+            logger.critical("WordPress connection failed. Aborting run.")
+            sys.exit(1)
+        if not wp.verify_post_type():
+            logger.critical(
+                "Custom post type '%s' REST endpoint not found. "
+                "Confirm it is registered with show_in_rest=True in WordPress.",
+                post_type,
+            )
+            sys.exit(1)
 
     # ── Fetch ──────────────────────────────────────────────────────────────────
     articles: list[Article] = fetch_all(config)

@@ -39,11 +39,37 @@ def _strip_html(html: str) -> str:
 class RSSFetcher:
     """Fetches articles from a single RSS/Atom feed via feedparser."""
 
-    def __init__(self, name: str, url: str, category_id: int, timeout: int = 20) -> None:
+    def __init__(
+        self,
+        name: str,
+        url: str,
+        category_id: int,
+        timeout: int = 20,
+        category_filter: Optional[str] = None,
+    ) -> None:
         self.name = name
         self.url = url
         self.category_id = category_id
         self.timeout = timeout
+        # When set, only keep entries whose category/title/summary contains
+        # this keyword (used for all-genre feeds like 東スポWEB).
+        self.category_filter = category_filter
+
+    def _matches_filter(self, entry: feedparser.FeedParserDict) -> bool:
+        if not self.category_filter:
+            return True
+        keyword = self.category_filter
+        tag_terms = " ".join(
+            (t.get("term") or "") for t in (getattr(entry, "tags", None) or [])
+        )
+        haystack = " ".join(
+            [
+                tag_terms,
+                entry.get("title", "") or "",
+                entry.get("summary", "") or "",
+            ]
+        )
+        return keyword in haystack
 
     def fetch(self) -> list[Article]:
         logger.info("[RSS] Fetching %s — %s", self.name, self.url)
@@ -68,6 +94,9 @@ class RSSFetcher:
             url = (entry.get("link") or "").strip()
             title = (entry.get("title") or "").strip()
             if not url or not title:
+                continue
+
+            if not self._matches_filter(entry):
                 continue
 
             raw_body = entry.get("summary") or entry.get("description") or ""
@@ -212,6 +241,7 @@ def _build_fetchers(config: dict) -> list[RSSFetcher | ScrapeFetcher]:
                 name=src["name"],
                 url=src["url"],
                 category_id=int(src.get("category_id", 1)),
+                category_filter=src.get("category_filter"),
             )
         )
 

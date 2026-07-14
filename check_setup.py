@@ -46,13 +46,13 @@ check(
 # ── 2. Dependencies ────────────────────────────────────────────────────────────
 print("\n[ Dependencies ]")
 pkgs = {
-    "feedparser":    "feedparser",
-    "httpx":         "httpx",
-    "bs4":           "beautifulsoup4",
-    "openai":        "openai",
-    "rapidfuzz":     "rapidfuzz",
-    "dotenv":        "python-dotenv",
-    "yaml":          "PyYAML",
+    "feedparser":   "feedparser",
+    "httpx":        "httpx",
+    "bs4":          "beautifulsoup4",
+    "google.genai": "google-genai",
+    "rapidfuzz":    "rapidfuzz",
+    "dotenv":       "python-dotenv",
+    "yaml":         "PyYAML",
 }
 for module, pip_name in pkgs.items():
     try:
@@ -63,7 +63,7 @@ for module, pip_name in pkgs.items():
 
 # ── 3. Environment variables ───────────────────────────────────────────────────
 print("\n[ Environment variables (.env) ]")
-required_env = ["OPENAI_API_KEY", "WP_BASE_URL", "WP_USERNAME", "WP_APP_PASSWORD"]
+required_env = ["GEMINI_API_KEY", "WP_BASE_URL", "WP_USERNAME", "WP_APP_PASSWORD"]
 env_ok = True
 for key in required_env:
     val = os.environ.get(key, "")
@@ -101,6 +101,9 @@ if env_ok:
         check("REST API connection + authentication", wp_ok)
 
         if wp_ok:
+            cpt_ok = wp.verify_post_type()
+            check("Custom post type 'horse_racing_news' endpoint accessible", cpt_ok,
+                  "must be registered with show_in_rest=True" if not cpt_ok else "")
             cats = wp.list_categories()
             check(f"Categories reachable: {len(cats)} found", len(cats) > 0)
             if cats:
@@ -110,23 +113,29 @@ if env_ok:
     except Exception as exc:
         check("WordPress client", False, str(exc))
 else:
-    print(f"  [--]  Skipped (env vars missing)")
+    print("  [--]  Skipped (env vars missing)")
 
-# ── 6. OpenAI connection ───────────────────────────────────────────────────────
-print("\n[ OpenAI ]")
-if os.environ.get("OPENAI_API_KEY"):
+# ── 6. Gemini connection ───────────────────────────────────────────────────────
+print("\n[ Gemini ]")
+if os.environ.get("GEMINI_API_KEY"):
     try:
-        from openai import OpenAI
-        client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-        models = client.models.list()
-        model_ids = [m.id for m in models.data]
-        has_mini = "gpt-4o-mini" in model_ids
-        check("API key valid", True)
-        check("gpt-4o-mini accessible", has_mini, "fallback: gpt-3.5-turbo" if not has_mini else "")
+        import yaml as _yaml
+        with open(config_path, encoding="utf-8") as _f:
+            _cfg = _yaml.safe_load(_f)
+        gemini_model = _cfg.get("gemini", {}).get("model", "gemini-flash-lite-latest")
+
+        from google import genai
+        client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+        resp = client.models.generate_content(
+            model=gemini_model,
+            contents="テスト。「OK」とだけ返してください。",
+        )
+        check(f"API key valid + {gemini_model} accessible", bool(resp.text))
+        print(f"    Response sample: {resp.text.strip()[:60]}")
     except Exception as exc:
-        check("OpenAI API key", False, str(exc))
+        check("Gemini API key", False, str(exc))
 else:
-    print(f"  [--]  Skipped (OPENAI_API_KEY missing)")
+    print("  [--]  Skipped (GEMINI_API_KEY missing)")
 
 # ── Summary ────────────────────────────────────────────────────────────────────
 print(f"\n{'='*44}")

@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 """
-AI rewriting module.
+AI rewriting module — Google Gemini 1.5 Flash (free tier).
 
-Sends each article to OpenAI GPT-4o-mini with a prompt that preserves
-all factual data (horse names, race name, jockey, odds, result) while
-producing an original 200–300 character Japanese text.
+Free tier limits (as of 2026):
+  - 15 RPM  (requests per minute)
+  - 1 500 RPD (requests per day)
+  - 1 000 000 TPM (tokens per minute)
 
-On any OpenAI error the module retries up to max_retries times with
-exponential back-off, then falls back to the original title/body so the
-pipeline never stops mid-run.
+To stay safely under 15 RPM we enforce a minimum 5-second gap between
+API calls (= max 12 RPM). On 429 / resource-exhausted errors we back off
+and retry up to max_retries times.
 """
 
 import logging
@@ -17,56 +18,51 @@ import re
 import time
 from typing import Optional
 
-from openai import OpenAI, RateLimitError, APIError, APIConnectionError
+from google import genai
+from google.genai.errors import ClientError, ServerError
 
 logger = logging.getLogger(__name__)
 
+# Minimum seconds between consecutive Gemini calls (free-tier rate guard)
+_MIN_CALL_INTERVAL = 5.0
+
 # ── Prompt ─────────────────────────────────────────────────────────────────────
 
-_SYSTEM_PROMPT = """\
+_PROMPT_TEMPLATE = """\
 あなたは競馬専門のニュースライターです。
-与えられたニュース記事を、以下のルールに従ってリライトしてください。
+以下のニュース記事を、下記のルールに従ってリライトしてください。
 
 【ルール】
-1. 馬名・レース名・着順・オッズ・騎手名・調教師名などの事実情報は変えないこと
-2. 文章のトーンは読者が楽しめる、生き生きとした表現にすること
+1. 馬名・レース名・着順・タイム・オッズ・騎手名などの事実情報は一切変えないこと
+2. 元の文章をそのままコピーせず、完全に独自の表現・言い回しで書くこと
 3. タイトルは30文字以内、本文は200〜300文字以内に収めること
-4. 著作権に抵触しないよう、元の文章をそのまま使わず完全にリライトすること
+4. 読者が楽しめる、生き生きとした文体にすること
 
-【出力フォーマット（この形式を厳守）】
+【出力フォーマット（厳守）】
 タイトル：（ここにタイトル）
-本文：（ここに本文）\
-"""
+本文：（ここに本文）
 
-_USER_TEMPLATE = """\
-以下の競馬ニュースをリライトしてください。
-
+---
 元タイトル：{title}
 
 元記事：
-{body}\
+{body}
 """
 
-# Max characters of the original body sent to the API (cost control)
-_MAX_BODY_CHARS = 1200
+_MAX_BODY_CHARS = 1200   # truncate long articles before sending (cost/token control)
 
 
 # ── Response parser ────────────────────────────────────────────────────────────
 
 def _parse_response(text: str) -> tuple[str, str]:
-    """
-    Extract title and body from the GPT response.
-    Returns ("", "") if parsing fails — caller should fall back to originals.
-    """
     title = ""
-    body_parts: list[str] = []
+    body_lines: list[str] = []
     in_body = False
 
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        # Match both ：(full-width) and :(half-width) separators
+    for raw in text.splitlines():
+        line = raw.strip()
         m_title = re.match(r"^タイトル[：:]\s*(.+)", line)
-        m_body = re.match(r"^本文[：:]\s*(.*)", line)
+        m_body  = re.match(r"^本文[：:]\s*(.*)",    line)
 
         if m_title:
             title = m_title.group(1).strip()
@@ -74,90 +70,101 @@ def _parse_response(text: str) -> tuple[str, str]:
         elif m_body:
             first = m_body.group(1).strip()
             if first:
-                body_parts.append(first)
+                body_lines.append(first)
             in_body = True
         elif in_body and line:
-            body_parts.append(line)
+            body_lines.append(line)
 
-    return title, "".join(body_parts)
+    return title, "".join(body_lines)
 
 
 # ── Rewriter ───────────────────────────────────────────────────────────────────
 
 class Rewriter:
-    """Wraps the OpenAI client with retry logic and response parsing."""
+    """Wraps Gemini 1.5 Flash with rate-limit handling and retry logic."""
 
     def __init__(
         self,
         api_key: str,
-        model: str = "gpt-4o-mini",
+        model: str = "gemini-flash-lite-latest",
         max_retries: int = 3,
-        initial_backoff: float = 2.0,
     ) -> None:
-        self.client = OpenAI(api_key=api_key)
-        self.model = model
+        self._client = genai.Client(api_key=api_key)
+        self._model = model
         self.max_retries = max_retries
-        self.initial_backoff = initial_backoff
+        self._last_call_at: float = 0.0
+
+    def _rate_limit_wait(self) -> None:
+        """Enforce minimum interval between API calls."""
+        elapsed = time.monotonic() - self._last_call_at
+        wait = _MIN_CALL_INTERVAL - elapsed
+        if wait > 0:
+            logger.debug("[Rewriter] Rate-limit wait: %.1fs", wait)
+            time.sleep(wait)
 
     def rewrite(self, title: str, body: str) -> tuple[str, str]:
         """
         Returns (rewritten_title, rewritten_body).
-        Falls back to (original_title, original_body) on persistent failure
-        so the pipeline can still mark the article as seen and move on.
+        Falls back to originals on persistent failure so the pipeline keeps running.
         """
-        # Truncate body to control token usage
-        truncated_body = body[:_MAX_BODY_CHARS] if body else "(本文なし — タイトルのみリライト)"
-        user_msg = _USER_TEMPLATE.format(title=title, body=truncated_body)
+        body_input = body[:_MAX_BODY_CHARS] if body else "（本文なし）"
+        prompt = _PROMPT_TEMPLATE.format(title=title, body=body_input)
 
         last_exc: Optional[Exception] = None
         for attempt in range(1, self.max_retries + 1):
+            self._rate_limit_wait()
             try:
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": _SYSTEM_PROMPT},
-                        {"role": "user",   "content": user_msg},
-                    ],
-                    max_tokens=500,
-                    temperature=0.75,
+                self._last_call_at = time.monotonic()
+                response = self._client.models.generate_content(
+                    model=self._model,
+                    contents=prompt,
                 )
-                raw = (response.choices[0].message.content or "").strip()
+                raw = (response.text or "").strip()
                 new_title, new_body = _parse_response(raw)
 
                 if not new_title:
                     new_title = title
                 if not new_body:
-                    # Entire response used as body if format was unexpected
-                    new_body = raw
+                    new_body = raw   # use full response if format was unexpected
 
                 logger.info(
-                    "[Rewriter] OK (attempt %d/%d) | %s → %s",
-                    attempt, self.max_retries,
-                    title[:40],
-                    new_title[:40],
+                    "[Rewriter] OK (attempt %d) | %s → %s",
+                    attempt, title[:40], new_title[:40],
                 )
                 return new_title, new_body
 
-            except RateLimitError as exc:
-                wait = self.initial_backoff * (2 ** (attempt - 1))
-                logger.warning(
-                    "[Rewriter] Rate limit — waiting %.0fs (attempt %d/%d)",
+            except ClientError as exc:
+                if "429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc):
+                    wait = 60.0 * attempt
+                    logger.warning(
+                        "[Rewriter] Rate limit (429) — waiting %.0fs (attempt %d/%d)",
+                        wait, attempt, self.max_retries,
+                    )
+                    time.sleep(wait)
+                else:
+                    logger.error("[Rewriter] Client error (attempt %d/%d): %s", attempt, self.max_retries, exc)
+                    time.sleep(5.0 * attempt)
+                last_exc = exc
+
+            except ServerError as exc:
+                wait = 10.0 * attempt
+                logger.error(
+                    "[Rewriter] Server error — waiting %.0fs (attempt %d/%d)",
                     wait, attempt, self.max_retries,
                 )
                 time.sleep(wait)
                 last_exc = exc
 
-            except (APIConnectionError, APIError) as exc:
-                wait = self.initial_backoff * attempt
+            except Exception as exc:
                 logger.error(
-                    "[Rewriter] API error (attempt %d/%d): %s — retrying in %.0fs",
-                    attempt, self.max_retries, exc, wait,
+                    "[Rewriter] Unexpected error (attempt %d/%d): %s",
+                    attempt, self.max_retries, exc,
                 )
-                time.sleep(wait)
+                time.sleep(5.0 * attempt)
                 last_exc = exc
 
         logger.error(
-            "[Rewriter] All %d attempts failed for '%s'. Using originals. Last error: %s",
+            "[Rewriter] All %d attempts failed for '%s'. Using originals. Last: %s",
             self.max_retries, title, last_exc,
         )
         return title, body

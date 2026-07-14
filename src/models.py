@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
@@ -14,13 +14,3 @@ class Article:
     source: str         # Friendly name of the source (e.g. "netkeiba")
     published_at: Optional[datetime] = None
     category_id: int = 1
-
-
-@dataclass
-class ProcessedArticle:
-    """Article after AI rewriting, ready for WordPress publishing."""
-    original: Article
-    rewritten_title: str
-    rewritten_body: str
-    featured_media_id: Optional[int]
-    wp_post_id: Optional[int] = None

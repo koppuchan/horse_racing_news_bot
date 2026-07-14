@@ -3,39 +3,46 @@
 # ============================================================
 
 rss_feeds:
+  # netkeiba「ニュース＆コラム新着情報」パック。競馬専門なので絞り込み不要。
+  # ※重要: netkeiba の利用規約は「RSSを利用したWebサービスの提供・記事/写真の
+  #   転用（営利・非営利を問わず）」を禁止しています。商用ポータルでの再配信は
+  #   規約違反となり得るため、必ず事前にご確認・許諾取得をお願いします。
   - name: netkeiba
-    url: "https://www.netkeiba.com/?pid=news_rss"
+    url: "https://rss.netkeiba.com/?pid=rss_netkeiba&site=netkeiba"
     category_id: 1   # Replace with your WP category ID
 
-  - name: jra_official
-    url: "https://www.jra.go.jp/news/rss.xml"
-    category_id: 2   # Replace with your WP category ID
-
-  - name: sports_navi_keiba
-    # Verify this URL is current; Yahoo RSS endpoints sometimes change
-    url: "https://sports.yahoo.co.jp/rss/horse/feed.xml"
+  # 日刊スポーツ 競馬（専用Atomフィード）。競馬専門なので絞り込み不要。
+  # ※重要: 日刊スポーツのRSS利用条件は「個人利用のみ／商業・営利目的での利用
+  #   禁止／プログラムによる再配信禁止」を明記しています。商用利用は要許諾。
+  - name: nikkansports_keiba
+    url: "https://www.nikkansports.com/keiba/atom.xml"
     category_id: 1
+
+  # 全ジャンル共通の総合フィードから category_filter で特定ジャンルのみ抽出する
+  # 使い方の例（東スポWEB）。※注意: 東スポWEBの総合フィードは競馬記事を
+  # ほとんど含まず（競馬コンテンツは別ドメイン tospo-keiba.jp にあり、そちらは
+  # RSS非提供）、公営競技はボート・競輪と混在します。既定では無効化しています。
+  # - name: tospo_keiba
+  #   url: "https://www.tokyo-sports.co.jp/list/feed/rss"
+  #   category_id: 1
+  #   category_filter: "競馬"
+
+  # 【スポーツナビ（Yahoo!）について】
+  # Yahoo! は公開RSSの提供を終了しており、旧RSSエンドポイント
+  # (sports.yahoo.co.jp/rss/...) は 403 を返します。JavaScript 描画・
+  # アクセス制限も強く、安定した自動取得が困難なため既定では無効化しています。
+  # 収集を希望される場合は scrape_sources での個別対応をご相談ください。
+  #
+  # 【JRA公式について】
+  # JRA公式サイトは news/rss.xml を提供しておらず 403 を返すため除外しています。
 
 # ============================================================
 # HTML scrape sources (for sites without RSS)
 # Adjust CSS selectors to match the site's actual HTML structure.
+# 現在は稼働中のスクレイピング対象はありません（必要になれば追記）。
 # ============================================================
 
-scrape_sources:
-  - name: tospo_keiba
-    list_url: "https://www.tokyo-sports.co.jp/category/horse-racing/"
-    category_id: 1
-    # CSS selector for each article card on the list page
-    article_selector: "article"
-    # Selector for the title element, relative to article_selector
-    title_selector: "h2, h3, .entry-title"
-    # Selector for the link element, relative to article_selector
-    link_selector: "a"
-    # Optional: CSS selector for article body on detail page.
-    # Set to null to use only the title (faster, less scraping).
-    body_selector: null
-    # Polite delay between HTTP requests (seconds)
-    request_delay: 3.0
+scrape_sources: []
 
 # ============================================================
 # Featured image mapping: WP category ID → WP media ID
@@ -48,13 +55,24 @@ category_image_map:
   2: 101   # e.g. JRA official image
 
 # ============================================================
-# WordPress defaults
+# Gemini settings
 # ============================================================
+# ※重要（2026-07 時点の確認結果）:
+#   現在の APIキーは認証は成功しますが、無料枠(free tier)の割当が実質 0 で、
+#   generate_content が 429 RESOURCE_EXHAUSTED（limit: 0）になります。
+#   安定運用には Google AI / Cloud プロジェクトで課金(有料枠)の有効化が必要です。
+#   ・gemini-2.0-flash-lite / gemini-2.0-flash … 現状ほぼ常に 429
+#   ・gemini-2.5-flash / 2.5-flash-lite        … 404「新規ユーザー提供終了」
+#   ・gemini-flash-lite-latest                 … 空きがある時のみ成功（不安定）
+#   下記はエイリアス指定にしています（提供終了モデルを避けるため）。
+gemini:
+  model: "gemini-flash-lite-latest"
 
 wordpress:
-  # "draft" = save as draft (recommended until AI output is verified)
-  # "publish" = go live immediately
+  # Per client spec: always save as draft for safe review before publishing
   default_status: "draft"
-  default_category_id: 1
-  # Fallback media ID when category has no specific mapping
-  default_featured_media_id: 100
+  # Custom post type slug — confirmed from /wp-json/wp/v2/types
+  post_type: "horse_racing_news"
+  # Common dummy eye-catch image media ID (upload one image to WP media library
+  # and paste its ID here — used for all posts)
+  default_featured_media_id: 1
