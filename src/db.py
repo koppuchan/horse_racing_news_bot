@@ -79,6 +79,18 @@ class Database:
             ).fetchone()
         return row is not None
 
+    def get_recent_original_titles(self, days: int = 1) -> list[str]:
+        """Return original titles of articles seen in the last N days."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "SELECT title FROM seen_articles WHERE processed_at >= ?",
+                (cutoff,)
+            )
+            return [row["title"] for row in cursor.fetchall()]
+
     def get_recent_normalized_titles(self, days: int = 7) -> list[str]:
         """
         Layer 2 dedup: returns normalized titles from the past N days

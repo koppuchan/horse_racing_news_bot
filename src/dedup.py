@@ -18,6 +18,9 @@ from rapidfuzz import fuzz
 
 from .db import Database
 from .models import Article
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from .rewriter import Rewriter
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +54,7 @@ def content_hash(body: str) -> str:
 
 # ── Main check ─────────────────────────────────────────────────────────────────
 
-def is_duplicate(article: Article, db: Database) -> bool:
+def is_duplicate(article: Article, db: Database, rewriter: 'Rewriter' = None) -> bool:
     """
     Returns True if the article should be skipped (already seen or too similar
     to a recently published story).
@@ -79,5 +82,19 @@ def is_duplicate(article: Article, db: Database) -> bool:
         if db.is_content_hash_seen(chash):
             logger.info("[Dedup L3] Content hash already seen: %s", article.url)
             return True
+
+    # ── Layer 4: AI Semantic Deduplication ────────────────────────────────────
+    if rewriter:
+        original_titles = db.get_recent_original_titles(days=1)
+        if original_titles:
+            # We don't want to pass too many titles (Gemini token limit/context limits)
+            # 24 hours of titles is usually safe. Limit to 50 just in case.
+            if len(original_titles) > 50:
+                original_titles = original_titles[-50:]
+            
+            is_ai_dup = rewriter.is_semantic_duplicate(article.title, original_titles)
+            if is_ai_dup:
+                logger.info("[Dedup L4] AI identified semantic duplicate: '%s'", article.title)
+                return True
 
     return False

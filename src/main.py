@@ -145,7 +145,7 @@ def run(dry_run: bool = False) -> None:
             article.category_id = classify_article(article.title, article.body)
 
             # Step 2: dedup check
-            if is_duplicate(article, db):
+            if is_duplicate(article, db, rewriter):
                 n_skipped_dedup += 1
                 continue
 

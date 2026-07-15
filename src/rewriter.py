@@ -52,6 +52,26 @@ _PROMPT_TEMPLATE = """\
 _MAX_BODY_CHARS = 1200   # truncate long articles before sending (cost/token control)
 
 
+_DEDUP_PROMPT_TEMPLATE = """\
+あなたは競馬ニュースの重複判定アシスタントです。
+以下の「新着記事のタイトル」が、「過去の投稿済みタイトルリスト」のいずれかと【全く同じ話題（事実）】を伝えているかどうかを判定してください。
+
+異なるメディアが同じレース結果や同じ出来事（転厩、ケガ、引退など）を報じている場合は「重複」とみなします。
+
+【判定基準】
+- 重複している場合：「YES」
+- 重複していない、または判断できない場合：「NO」
+※必ず「YES」か「NO」のどちらかのみを出力してください。
+
+---
+新着記事のタイトル：
+{new_title}
+
+過去の投稿済みタイトルリスト：
+{recent_titles_text}
+"""
+
+
 # ── Response parser ────────────────────────────────────────────────────────────
 
 def _parse_response(text: str) -> tuple[str, str]:
@@ -168,3 +188,48 @@ class Rewriter:
             self.max_retries, title, last_exc,
         )
         return title, body
+
+    def is_semantic_duplicate(self, new_title: str, recent_titles: list[str]) -> bool:
+        """
+        Uses Gemini to determine if new_title reports the exact same news
+        as any title in recent_titles.
+        Returns True if AI says 'YES', False otherwise.
+        """
+        if not recent_titles:
+            return False
+
+        # Format recent titles into a bulleted list
+        recent_text = "\n".join(f"- {t}" for t in recent_titles)
+        prompt = _DEDUP_PROMPT_TEMPLATE.format(new_title=new_title, recent_titles_text=recent_text)
+
+        last_exc: Optional[Exception] = None
+        for attempt in range(1, self.max_retries + 1):
+            self._rate_limit_wait()
+            try:
+                self._last_call_at = time.monotonic()
+                response = self._client.models.generate_content(
+                    model=self._model,
+                    contents=prompt,
+                )
+                raw = (response.text or "").strip().upper()
+                is_dup = "YES" in raw
+
+                logger.info("[Rewriter] AI Dedup OK | '%s' -> %s", new_title[:30], "DUPLICATE" if is_dup else "UNIQUE")
+                return is_dup
+
+            except ClientError as exc:
+                if "429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc):
+                    wait = 60.0 * attempt
+                    logger.warning("[Rewriter] AI Dedup Rate limit (429) — waiting %.0fs (attempt %d/%d)", wait, attempt, self.max_retries)
+                    time.sleep(wait)
+                else:
+                    logger.error("[Rewriter] AI Dedup Client error (attempt %d/%d): %s", attempt, self.max_retries, exc)
+                    time.sleep(5.0 * attempt)
+                last_exc = exc
+            except Exception as exc:
+                logger.error("[Rewriter] AI Dedup error (attempt %d/%d): %s", attempt, self.max_retries, exc)
+                time.sleep(5.0 * attempt)
+                last_exc = exc
+
+        logger.error("[Rewriter] AI Dedup failed. Assuming NO duplicate. Last error: %s", last_exc)
+        return False
