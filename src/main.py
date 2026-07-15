@@ -26,6 +26,7 @@ from typing import Optional
 import yaml
 from dotenv import load_dotenv
 
+from .classifier import classify_article
 from .db import Database
 from .dedup import is_duplicate, content_hash, normalize_title
 from .fetcher import fetch_all
@@ -140,7 +141,10 @@ def run(dry_run: bool = False) -> None:
 
     for article in articles:
         try:
-            # Step 1: dedup check
+            # Step 1: Classify article
+            article.category_id = classify_article(article.title, article.body)
+
+            # Step 2: dedup check
             if is_duplicate(article, db):
                 n_skipped_dedup += 1
                 continue

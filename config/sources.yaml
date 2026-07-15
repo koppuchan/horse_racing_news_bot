@@ -51,8 +51,9 @@ scrape_sources: []
 # ============================================================
 
 category_image_map:
-  1: 100   # e.g. race results image
-  2: 101   # e.g. JRA official image
+  16: 5882   # 追い切り (oikiri)
+  17: 5883   # レース結果 (result)
+  18: 5881   # ニュース (news)
 
 # ============================================================
 # Gemini settings
@@ -75,4 +76,4 @@ wordpress:
   post_type: "horse_racing_news"
   # Common dummy eye-catch image media ID (upload one image to WP media library
   # and paste its ID here — used for all posts)
-  default_featured_media_id: 1
+  default_featured_media_id: 5881
