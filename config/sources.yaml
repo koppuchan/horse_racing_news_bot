@@ -77,8 +77,8 @@ gemini:
   model: "gemini-flash-lite-latest"
 
 wordpress:
-  # Per client spec: always save as draft for safe review before publishing
-  default_status: "draft"
+  # Per client spec: switch to publish for auto-posting
+  default_status: "publish"
   # Custom post type slug — confirmed from /wp-json/wp/v2/types
   post_type: "horse_racing_news"
   # Common dummy eye-catch image media ID (upload one image to WP media library

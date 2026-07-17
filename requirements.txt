@@ -6,3 +6,4 @@ rapidfuzz>=3.9.0
 python-dotenv>=1.0.1
 PyYAML>=6.0.1
 lxml>=5.2.0
+Flask>=3.1.0
