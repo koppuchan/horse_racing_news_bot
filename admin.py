@@ -100,6 +100,6 @@ def delete_keyword():
     return redirect(url_for("index"))
 
 if __name__ == "__main__":
-    # 0.0.0.0 to allow external access. ConoHa VPS default Web security group allows port 80.
-    print("管理画面を起動しました。ブラウザで http://(VPSのIPアドレス)/ にアクセスしてください。")
-    app.run(host="0.0.0.0", port=80)
+    # 0.0.0.0 to allow external access. Port 5000 is default, we'll use 8080 to avoid conflicts.
+    print("管理画面を起動しました。ブラウザで http://(VPSのIPアドレス):8080 にアクセスしてください。")
+    app.run(host="0.0.0.0", port=8080)
