@@ -270,10 +270,23 @@ def fetch_all(config: dict) -> list[Article]:
     fetchers = _build_fetchers(config)
     seen_urls: set[str] = set()
     all_articles: list[Article] = []
+    
+    blacklist: list[str] = config.get("blacklist_keywords", [])
 
     for fetcher in fetchers:
         try:
             for article in fetcher.fetch():
+                # Apply blacklist filter (title or URL)
+                is_blacklisted = False
+                for keyword in blacklist:
+                    if keyword in article.title or keyword in article.url:
+                        logger.info("Skipped blacklisted article: '%s' (matched: %s)", article.title, keyword)
+                        is_blacklisted = True
+                        break
+                
+                if is_blacklisted:
+                    continue
+
                 if article.url not in seen_urls:
                     seen_urls.add(article.url)
                     all_articles.append(article)
