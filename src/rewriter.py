@@ -35,8 +35,9 @@ _PROMPT_TEMPLATE = """\
 【ルール】
 1. 馬名・レース名・着順・タイム・オッズ・騎手名などの事実情報は一切変えないこと
 2. 元の文章をそのままコピーせず、完全に独自の表現・言い回しで書くこと
-3. タイトルは30文字以内、本文は200〜300文字以内に収めること
-4. 読者が楽しめる、生き生きとした文体にすること
+3. タイトルは30文字以内に収めること（ただし、タイトルの中に「〇文字」などの文字数に関する記載は絶対に含めないでください）
+4. 本文は200〜300文字以内に収めること
+5. 読者が楽しめる、生き生きとした文体にすること
 
 【出力フォーマット（厳守）】
 タイトル：（ここにタイトル）
@@ -86,6 +87,9 @@ def _parse_response(text: str) -> tuple[str, str]:
 
         if m_title:
             title = m_title.group(1).strip()
+            # Remove hallucinations like 【28文字】 or (30文字) from the title
+            title = re.sub(r"[【（\(]\s*\d+\s*文字\s*[】）\)]", "", title).strip()
+            title = re.sub(r"^\d+文字\s*", "", title).strip()
             in_body = False
         elif m_body:
             first = m_body.group(1).strip()
