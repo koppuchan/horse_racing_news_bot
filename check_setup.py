@@ -122,16 +122,38 @@ if os.environ.get("GEMINI_API_KEY"):
         import yaml as _yaml
         with open(config_path, encoding="utf-8") as _f:
             _cfg = _yaml.safe_load(_f)
-        gemini_model = _cfg.get("gemini", {}).get("model", "gemini-flash-lite-latest")
+        _gemini_cfg = _cfg.get("gemini", {})
+        gemini_model = _gemini_cfg.get("model", "gemini-flash-lite-latest")
+        _chain = [gemini_model] + [
+            m for m in _gemini_cfg.get("fallback_models", []) if m != gemini_model
+        ]
 
         from google import genai
         client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-        resp = client.models.generate_content(
-            model=gemini_model,
-            contents="テスト。「OK」とだけ返してください。",
+
+        # Every model in the chain is probed: if none answers, no article can be
+        # rewritten, and the bot will publish nothing (by design — see rewriter.py).
+        usable = []
+        for _model in _chain:
+            try:
+                resp = client.models.generate_content(
+                    model=_model,
+                    contents="テスト。「OK」とだけ返してください。",
+                )
+                if resp.text:
+                    usable.append(_model)
+                    print(f"  [OK]  {_model} — {resp.text.strip()[:40]}")
+                else:
+                    print(f"  [--]  {_model} — empty response")
+            except Exception as exc:
+                print(f"  [--]  {_model} — {str(exc)[:110]}")
+
+        check(
+            f"At least one Gemini model usable ({len(usable)}/{len(_chain)})",
+            bool(usable),
+            "全モデルが利用不可です。429 の場合は API キーの課金(有料枠)を有効化してください。"
+            "この状態では記事は投稿されません（途中で切れた記事を出さないための仕様）。",
         )
-        check(f"API key valid + {gemini_model} accessible", bool(resp.text))
-        print(f"    Response sample: {resp.text.strip()[:60]}")
     except Exception as exc:
         check("Gemini API key", False, str(exc))
 else:

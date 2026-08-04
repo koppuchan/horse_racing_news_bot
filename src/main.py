@@ -32,7 +32,7 @@ from .dedup import is_duplicate, content_hash, normalize_title
 from .fetcher import fetch_all
 from .models import Article
 from .publisher import WordPressClient
-from .rewriter import Rewriter
+from .rewriter import Rewriter, RewriteError
 
 # ── Logging setup ──────────────────────────────────────────────────────────────
 
@@ -105,8 +105,13 @@ def run(dry_run: bool = False) -> None:
 
     # ── Service init ───────────────────────────────────────────────────────────
     db = Database(_PROJECT_ROOT / "data" / "seen_articles.db")
-    gemini_model = config.get("gemini", {}).get("model", "gemini-flash-lite-latest")
-    rewriter = Rewriter(api_key=env["GEMINI_API_KEY"], model=gemini_model)
+    gemini_config: dict = config.get("gemini", {})
+    gemini_model = gemini_config.get("model", "gemini-flash-lite-latest")
+    rewriter = Rewriter(
+        api_key=env["GEMINI_API_KEY"],
+        model=gemini_model,
+        fallback_models=gemini_config.get("fallback_models", []),
+    )
     post_type = wp_config.get("post_type", "keiba_news")
     wp = WordPressClient(
         base_url=env["WP_BASE_URL"],
@@ -137,6 +142,7 @@ def run(dry_run: bool = False) -> None:
     # ── Process ────────────────────────────────────────────────────────────────
     n_processed = 0
     n_skipped_dedup = 0
+    n_skipped_rewrite = 0
     n_failed = 0
 
     for article in articles:
@@ -150,7 +156,18 @@ def run(dry_run: bool = False) -> None:
                 continue
 
             # Step 2: AI rewrite
-            rewritten_title, rewritten_body = rewriter.rewrite(article.title, article.body)
+            # On failure we skip the article entirely and leave it unrecorded, so
+            # the next run picks it up again. Publishing the un-rewritten article
+            # is not an option: the RSS body is only a truncated excerpt.
+            try:
+                rewritten_title, rewritten_body = rewriter.rewrite(article.title, article.body)
+            except RewriteError as exc:
+                logger.warning(
+                    "Skipping (rewrite failed, will retry next run): '%s' — %s",
+                    article.title[:60], exc,
+                )
+                n_skipped_rewrite += 1
+                continue
 
             if dry_run:
                 logger.info(
@@ -205,6 +222,13 @@ def run(dry_run: bool = False) -> None:
 
     # ── Summary ────────────────────────────────────────────────────────────────
     logger.info(
-        "Run complete — processed=%d  skipped(dedup)=%d  failed=%d",
-        n_processed, n_skipped_dedup, n_failed,
+        "Run complete — processed=%d  skipped(dedup)=%d  skipped(rewrite)=%d  failed=%d",
+        n_processed, n_skipped_dedup, n_skipped_rewrite, n_failed,
     )
+    if n_skipped_rewrite:
+        logger.warning(
+            "%d article(s) were not published because the AI rewrite failed. "
+            "This is usually Gemini quota (429) — check billing on the API key. "
+            "They will be retried on the next run.",
+            n_skipped_rewrite,
+        )

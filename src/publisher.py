@@ -132,6 +132,85 @@ class WordPressClient:
             logger.error("[WP] Unexpected error creating post '%s': %s", title[:60], exc)
             return None
 
+    # ── Post reading / updating ────────────────────────────────────────────────
+
+    def iter_posts(self, per_page: int = 50, max_pages: int = 100):
+        """
+        Yield every post of the configured post type, newest first.
+
+        Used by regenerate_truncated.py to audit what is actually live on the
+        site rather than trusting the local DB.
+        """
+        endpoint = f"{self.api}/{self.post_type}"
+        for page in range(1, max_pages + 1):
+            try:
+                with self._client() as client:
+                    resp = client.get(
+                        endpoint,
+                        params={
+                            "per_page": per_page,
+                            "page": page,
+                            "status": "publish,draft",
+                            "orderby": "date",
+                            "order": "desc",
+                        },
+                    )
+                if resp.status_code == 400:
+                    # WP returns 400 "rest_post_invalid_page_number" past the end.
+                    return
+                resp.raise_for_status()
+                batch = resp.json()
+            except Exception as exc:
+                logger.error("[WP] Failed to list posts (page %d): %s", page, exc)
+                return
+
+            if not batch:
+                return
+            for post in batch:
+                yield post
+            if len(batch) < per_page:
+                return
+
+    def update_post(
+        self,
+        post_id: int,
+        *,
+        title: Optional[str] = None,
+        content: Optional[str] = None,
+        excerpt: Optional[str] = None,
+    ) -> bool:
+        """
+        Update an existing post in place.
+
+        The slug is deliberately never sent, so the permalink stays valid even
+        when the title changes.
+        """
+        payload: dict = {}
+        if title is not None:
+            payload["title"] = title
+        if content is not None:
+            payload["content"] = content
+        if excerpt is not None:
+            payload["excerpt"] = excerpt
+        if not payload:
+            return True
+
+        try:
+            with self._client() as client:
+                resp = client.post(f"{self.api}/{self.post_type}/{post_id}", json=payload)
+            resp.raise_for_status()
+            logger.info("[WP] Post %d updated", post_id)
+            return True
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                "[WP] HTTP %d updating post %d: %s",
+                exc.response.status_code, post_id, exc.response.text[:300],
+            )
+            return False
+        except Exception as exc:
+            logger.error("[WP] Unexpected error updating post %d: %s", post_id, exc)
+            return False
+
     # ── Diagnostic helpers ─────────────────────────────────────────────────────
 
     def verify_post_type(self) -> bool:

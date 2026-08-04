@@ -52,6 +52,51 @@ _PROMPT_TEMPLATE = """\
 
 _MAX_BODY_CHARS = 1200   # truncate long articles before sending (cost/token control)
 
+# A usable rewrite must be at least this long. Anything shorter means the model
+# returned a fragment / refusal rather than the 200-300 char body we asked for.
+_MIN_BODY_CHARS = 60
+
+# Repairs are rebuilt from a truncated excerpt only, so they are legitimately
+# shorter than a normal rewrite.
+_MIN_REPAIR_BODY_CHARS = 50
+
+# Consecutive quota (429) failures after which we stop calling the API for the
+# rest of the run. Without this, an exhausted quota makes every article burn
+# several minutes of backoff before failing anyway.
+_QUOTA_CIRCUIT_THRESHOLD = 2
+
+# If the whole model chain fails for this many articles in a row, Gemini is down
+# (e.g. the 2026-08-04 503 "high demand" outage), not just flaky. Stop calling it
+# for the rest of the run so a 30-minute cron job cannot overrun into the next one.
+_OUTAGE_CIRCUIT_THRESHOLD = 2
+
+
+_REPAIR_PROMPT_TEMPLATE = """\
+あなたは競馬専門のニュース編集者です。
+以下は、配信元から取得できた文章が途中で切れてしまった記事です。
+これを、読者が違和感なく読める「完結した記事」に書き直してください。
+
+【厳守事項】
+1. 元の文章に書かれていない事実（馬名・レース名・着順・タイム・オッズ・騎手名・
+   日付・数値・固有名詞など）を、絶対に追加・推測・創作しないこと
+2. 情報が途中で途切れている部分は、無理に内容を補わず、
+   判明している範囲だけで自然にまとめて締めくくること
+3. 元の文章をそのままコピーせず、独自の表現・言い回しで書くこと
+4. タイトルは30文字以内に収めること（「〇文字」などの記載は含めないこと）
+5. 本文は120〜200文字程度とし、必ず句点「。」で終わる完結した文章にすること
+6. 「…」「続きは」などの省略表現を使わないこと
+
+【出力フォーマット（厳守）】
+タイトル：（ここにタイトル）
+本文：（ここに本文）
+
+---
+元タイトル：{title}
+
+途中で切れた記事：
+{body}
+"""
+
 
 _DEDUP_PROMPT_TEMPLATE = """\
 あなたは競馬ニュースの重複判定アシスタントです。
@@ -71,6 +116,19 @@ _DEDUP_PROMPT_TEMPLATE = """\
 過去の投稿済みタイトルリスト：
 {recent_titles_text}
 """
+
+
+# ── Errors ─────────────────────────────────────────────────────────────────────
+
+class RewriteError(RuntimeError):
+    """
+    Raised when Gemini could not produce a usable rewrite.
+
+    The caller must NOT publish the article in this case: the original body we
+    receive from RSS is only a truncated excerpt (it ends in "…"), so falling
+    back to it puts a half-finished sentence on the site — and republishing the
+    source text verbatim breaches the feed providers' terms as well.
+    """
 
 
 # ── Response parser ────────────────────────────────────────────────────────────
@@ -102,6 +160,17 @@ def _parse_response(text: str) -> tuple[str, str]:
     return title, "".join(body_lines)
 
 
+def _finish_reason(response) -> str:
+    """Name of the candidate's finish reason ('STOP' when generation completed)."""
+    candidates = getattr(response, "candidates", None) or []
+    if not candidates:
+        return "NO_CANDIDATE"
+    reason = getattr(candidates[0], "finish_reason", None)
+    if reason is None:
+        return "STOP"
+    return getattr(reason, "name", str(reason))
+
+
 # ── Rewriter ───────────────────────────────────────────────────────────────────
 
 class Rewriter:
@@ -112,11 +181,18 @@ class Rewriter:
         api_key: str,
         model: str = "gemini-flash-lite-latest",
         max_retries: int = 3,
+        fallback_models: Optional[list[str]] = None,
     ) -> None:
         self._client = genai.Client(api_key=api_key)
-        self._model = model
+        # Tried in order; a model that is out of quota or retired falls through
+        # to the next one instead of failing the whole article.
+        self._models = [model] + [m for m in (fallback_models or []) if m != model]
         self.max_retries = max_retries
         self._last_call_at: float = 0.0
+        self._quota_failures = 0
+        self._chain_failures = 0
+        self._ai_disabled = False
+        self._disabled_reason = ""
 
     def _rate_limit_wait(self) -> None:
         """Enforce minimum interval between API calls."""
@@ -129,69 +205,161 @@ class Rewriter:
     def rewrite(self, title: str, body: str) -> tuple[str, str]:
         """
         Returns (rewritten_title, rewritten_body).
-        Falls back to originals on persistent failure so the pipeline keeps running.
+
+        Raises RewriteError if no model in the chain produced a usable rewrite.
+        We deliberately do NOT fall back to the originals: the RSS body is a
+        truncated excerpt, so publishing it shows a cut-off article.
         """
         body_input = body[:_MAX_BODY_CHARS] if body else "（本文なし）"
         prompt = _PROMPT_TEMPLATE.format(title=title, body=body_input)
-
-        last_exc: Optional[Exception] = None
-        for attempt in range(1, self.max_retries + 1):
-            self._rate_limit_wait()
-            try:
-                self._last_call_at = time.monotonic()
-                response = self._client.models.generate_content(
-                    model=self._model,
-                    contents=prompt,
-                )
-                raw = (response.text or "").strip()
-                new_title, new_body = _parse_response(raw)
-
-                if not new_title:
-                    new_title = title
-                if not new_body:
-                    new_body = raw   # use full response if format was unexpected
-
-                logger.info(
-                    "[Rewriter] OK (attempt %d) | %s → %s",
-                    attempt, title[:40], new_title[:40],
-                )
-                return new_title, new_body
-
-            except ClientError as exc:
-                if "429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc):
-                    wait = 60.0 * attempt
-                    logger.warning(
-                        "[Rewriter] Rate limit (429) — waiting %.0fs (attempt %d/%d)",
-                        wait, attempt, self.max_retries,
-                    )
-                    time.sleep(wait)
-                else:
-                    logger.error("[Rewriter] Client error (attempt %d/%d): %s", attempt, self.max_retries, exc)
-                    time.sleep(5.0 * attempt)
-                last_exc = exc
-
-            except ServerError as exc:
-                wait = 10.0 * attempt
-                logger.error(
-                    "[Rewriter] Server error — waiting %.0fs (attempt %d/%d)",
-                    wait, attempt, self.max_retries,
-                )
-                time.sleep(wait)
-                last_exc = exc
-
-            except Exception as exc:
-                logger.error(
-                    "[Rewriter] Unexpected error (attempt %d/%d): %s",
-                    attempt, self.max_retries, exc,
-                )
-                time.sleep(5.0 * attempt)
-                last_exc = exc
-
-        logger.error(
-            "[Rewriter] All %d attempts failed for '%s'. Using originals. Last: %s",
-            self.max_retries, title, last_exc,
+        new_title, new_body = self._generate(
+            prompt, min_body_chars=_MIN_BODY_CHARS, label=title
         )
-        return title, body
+        # The body is what readers see, so a missing title is recoverable —
+        # reuse the original headline.
+        return (new_title or title), new_body
+
+    def repair_truncated(self, title: str, truncated_body: str) -> tuple[str, str]:
+        """
+        Rebuild an article that was published un-rewritten and therefore ends
+        mid-sentence. Used by regenerate_truncated.py to fix posts that are
+        already live.
+
+        Only the truncated text is available as source material, so the prompt
+        forbids inventing facts to fill the gap; the result is shorter than a
+        normal rewrite but factually bounded by what we actually have.
+        """
+        prompt = _REPAIR_PROMPT_TEMPLATE.format(
+            title=title, body=truncated_body[:_MAX_BODY_CHARS]
+        )
+        new_title, new_body = self._generate(
+            prompt, min_body_chars=_MIN_REPAIR_BODY_CHARS, label=title
+        )
+        return (new_title or title), new_body
+
+    def _generate(
+        self, prompt: str, *, min_body_chars: int, label: str
+    ) -> tuple[str, str]:
+        """
+        Run a prompt through the model chain and return the parsed
+        (title, body). The title may be empty; the body is guaranteed to be at
+        least min_body_chars long. Raises RewriteError if nothing usable came back.
+        """
+        if self._ai_disabled:
+            raise RewriteError(
+                f"Gemini disabled earlier in this run ({self._disabled_reason})"
+            )
+
+        last_error: str = "unknown"
+        for model in self._models:
+            for attempt in range(1, self.max_retries + 1):
+                self._rate_limit_wait()
+                try:
+                    self._last_call_at = time.monotonic()
+                    response = self._client.models.generate_content(
+                        model=model,
+                        contents=prompt,
+                    )
+                    self._quota_failures = 0
+                    self._chain_failures = 0
+
+                    reason = _finish_reason(response)
+                    if reason != "STOP":
+                        # MAX_TOKENS / SAFETY here means the text we got is cut
+                        # off mid-sentence — exactly what we must not publish.
+                        last_error = f"generation did not complete ({reason})"
+                        logger.warning(
+                            "[Rewriter] %s (%s attempt %d/%d)",
+                            last_error, model, attempt, self.max_retries,
+                        )
+                        continue
+
+                    raw = (response.text or "").strip()
+                    new_title, new_body = _parse_response(raw)
+
+                    if len(new_body) < min_body_chars:
+                        last_error = f"body too short ({len(new_body)} chars)"
+                        logger.warning(
+                            "[Rewriter] %s (%s attempt %d/%d) — raw: %r",
+                            last_error, model, attempt, self.max_retries, raw[:200],
+                        )
+                        continue
+
+                    logger.info(
+                        "[Rewriter] OK (%s attempt %d) | %s → %s (%d chars)",
+                        model, attempt, label[:40], new_title[:40], len(new_body),
+                    )
+                    return new_title, new_body
+
+                except ClientError as exc:
+                    if "429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc):
+                        self._quota_failures += 1
+                        last_error = f"rate limited (429) on {model}"
+                        if self._quota_failures >= _QUOTA_CIRCUIT_THRESHOLD:
+                            # Quota is gone; stop burning minutes of backoff on
+                            # every remaining article in this run.
+                            self._disable(
+                                f"quota exhausted after {self._quota_failures} "
+                                "consecutive 429s"
+                            )
+                            raise RewriteError(last_error) from exc
+                        wait = 60.0 * attempt
+                        logger.warning(
+                            "[Rewriter] Rate limit (429) — waiting %.0fs (%s attempt %d/%d)",
+                            wait, model, attempt, self.max_retries,
+                        )
+                        time.sleep(wait)
+                    else:
+                        last_error = f"client error: {exc}"
+                        logger.error(
+                            "[Rewriter] Client error (%s attempt %d/%d): %s",
+                            model, attempt, self.max_retries, exc,
+                        )
+                        # 404 (model retired) or 400 won't fix itself on retry —
+                        # move straight to the next model in the chain.
+                        break
+
+                except ServerError as exc:
+                    last_error = f"server error: {exc}"
+                    # 503 means *this* model is overloaded right now, so another
+                    # model in the chain is far more likely to answer than the
+                    # same one. Retry once, then move on instead of burning 60s.
+                    logger.error(
+                        "[Rewriter] Server error (%s attempt %d/%d): %s",
+                        model, attempt, self.max_retries, str(exc)[:120],
+                    )
+                    if attempt >= 2:
+                        break
+                    time.sleep(5.0)
+
+                except Exception as exc:
+                    last_error = f"unexpected error: {exc}"
+                    logger.error(
+                        "[Rewriter] Unexpected error (%s attempt %d/%d): %s",
+                        model, attempt, self.max_retries, exc,
+                    )
+                    time.sleep(5.0 * attempt)
+
+            if model != self._models[-1]:
+                logger.warning("[Rewriter] Model '%s' failed — trying next model", model)
+
+        self._chain_failures += 1
+        if self._chain_failures >= _OUTAGE_CIRCUIT_THRESHOLD:
+            self._disable(
+                f"every model failed for {self._chain_failures} articles in a row "
+                f"({last_error})"
+            )
+        raise RewriteError(
+            f"all {len(self._models)} model(s) failed for '{label[:60]}': {last_error}"
+        )
+
+    def _disable(self, reason: str) -> None:
+        """Stop calling Gemini for the remainder of this run."""
+        self._ai_disabled = True
+        self._disabled_reason = reason
+        logger.error(
+            "[Rewriter] Disabling AI for the rest of this run — %s", reason
+        )
 
     def is_semantic_duplicate(self, new_title: str, recent_titles: list[str]) -> bool:
         """
@@ -199,7 +367,7 @@ class Rewriter:
         as any title in recent_titles.
         Returns True if AI says 'YES', False otherwise.
         """
-        if not recent_titles:
+        if not recent_titles or self._ai_disabled:
             return False
 
         # Format recent titles into a bulleted list
@@ -212,9 +380,10 @@ class Rewriter:
             try:
                 self._last_call_at = time.monotonic()
                 response = self._client.models.generate_content(
-                    model=self._model,
+                    model=self._models[0],
                     contents=prompt,
                 )
+                self._quota_failures = 0
                 raw = (response.text or "").strip().upper()
                 is_dup = "YES" in raw
 
@@ -223,6 +392,13 @@ class Rewriter:
 
             except ClientError as exc:
                 if "429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc):
+                    self._quota_failures += 1
+                    if self._quota_failures >= _QUOTA_CIRCUIT_THRESHOLD:
+                        self._disable(
+                            f"quota exhausted after {self._quota_failures} "
+                            "consecutive 429s (dedup)"
+                        )
+                        return False
                     wait = 60.0 * attempt
                     logger.warning("[Rewriter] AI Dedup Rate limit (429) — waiting %.0fs (attempt %d/%d)", wait, attempt, self.max_retries)
                     time.sleep(wait)
@@ -230,6 +406,15 @@ class Rewriter:
                     logger.error("[Rewriter] AI Dedup Client error (attempt %d/%d): %s", attempt, self.max_retries, exc)
                     time.sleep(5.0 * attempt)
                 last_exc = exc
+
+            except ServerError as exc:
+                # Dedup is a best-effort extra layer (L1-L3 still ran), so don't
+                # spend 30s retrying an overloaded model — just let it through.
+                logger.warning(
+                    "[Rewriter] AI Dedup unavailable (%s) — relying on L1-L3 dedup",
+                    str(exc)[:120],
+                )
+                return False
             except Exception as exc:
                 logger.error("[Rewriter] AI Dedup error (attempt %d/%d): %s", attempt, self.max_retries, exc)
                 time.sleep(5.0 * attempt)
