@@ -65,16 +65,29 @@ category_image_map:
 # ============================================================
 # Gemini settings
 # ============================================================
-# ※重要（2026-07 時点の確認結果）:
-#   現在の APIキーは認証は成功しますが、無料枠(free tier)の割当が実質 0 で、
-#   generate_content が 429 RESOURCE_EXHAUSTED（limit: 0）になります。
-#   安定運用には Google AI / Cloud プロジェクトで課金(有料枠)の有効化が必要です。
-#   ・gemini-2.0-flash-lite / gemini-2.0-flash … 現状ほぼ常に 429
-#   ・gemini-2.5-flash / 2.5-flash-lite        … 404「新規ユーザー提供終了」
-#   ・gemini-flash-lite-latest                 … 空きがある時のみ成功（不安定）
-#   下記はエイリアス指定にしています（提供終了モデルを避けるため）。
+# 【障害履歴】
+#   2026-07: APIキーが無料枠の割当 0 で 429 RESOURCE_EXHAUSTED になっていた。
+#            → 2026-08-04 に顧客側で課金(有料枠 Tier 1/プロジェクト keibanews)を
+#              有効化済み。解消。
+#   2026-08-04 15:43〜17:16 (JST): Google側の障害。gemini-flash-lite-latest が
+#            503 UNAVAILABLE「This model is currently experiencing high demand」を
+#            返し続けた。課金・枠とは無関係。この間リライトが全滅し、記事7本が
+#            リライトされないまま（＝末尾が「…」で途切れた状態で）投稿された。
+#            対策: ①失敗時は投稿しない ②複数モデルへフォールバック
+#                  ③連続失敗でそのラン中のAI呼び出しを打ち切り
+#   503 は「そのモデルが混雑している」という意味なので、同じモデルを粘るより
+#   別モデルに切り替えた方が通る。fallback_models はそのために必須。
+#
+# リライトに失敗した記事は「投稿されない」仕様です（次回実行で再試行）。
+# 元記事のRSS本文は「…」で終わる抜粋のため、そのまま投稿すると
+# 記事が途中で切れて表示されてしまうためです。
 gemini:
   model: "gemini-flash-lite-latest"
+  # 上の model が 429（枠なし）や 404（提供終了）になった場合に順に試すモデル。
+  fallback_models:
+    - "gemini-flash-latest"
+    - "gemini-2.0-flash-lite"
+    - "gemini-2.0-flash"
 
 wordpress:
   # Per client spec: switch to publish for auto-posting
