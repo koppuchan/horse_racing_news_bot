@@ -56,6 +56,10 @@ _MAX_BODY_CHARS = 1200   # truncate long articles before sending (cost/token con
 # returned a fragment / refusal rather than the 200-300 char body we asked for.
 _MIN_BODY_CHARS = 60
 
+# Repairs are rebuilt from a truncated excerpt only, so they are legitimately
+# shorter than a normal rewrite.
+_MIN_REPAIR_BODY_CHARS = 50
+
 # Consecutive quota (429) failures after which we stop calling the API for the
 # rest of the run. Without this, an exhausted quota makes every article burn
 # several minutes of backoff before failing anyway.
@@ -65,6 +69,33 @@ _QUOTA_CIRCUIT_THRESHOLD = 2
 # (e.g. the 2026-08-04 503 "high demand" outage), not just flaky. Stop calling it
 # for the rest of the run so a 30-minute cron job cannot overrun into the next one.
 _OUTAGE_CIRCUIT_THRESHOLD = 2
+
+
+_REPAIR_PROMPT_TEMPLATE = """\
+あなたは競馬専門のニュース編集者です。
+以下は、配信元から取得できた文章が途中で切れてしまった記事です。
+これを、読者が違和感なく読める「完結した記事」に書き直してください。
+
+【厳守事項】
+1. 元の文章に書かれていない事実（馬名・レース名・着順・タイム・オッズ・騎手名・
+   日付・数値・固有名詞など）を、絶対に追加・推測・創作しないこと
+2. 情報が途中で途切れている部分は、無理に内容を補わず、
+   判明している範囲だけで自然にまとめて締めくくること
+3. 元の文章をそのままコピーせず、独自の表現・言い回しで書くこと
+4. タイトルは30文字以内に収めること（「〇文字」などの記載は含めないこと）
+5. 本文は120〜200文字程度とし、必ず句点「。」で終わる完結した文章にすること
+6. 「…」「続きは」などの省略表現を使わないこと
+
+【出力フォーマット（厳守）】
+タイトル：（ここにタイトル）
+本文：（ここに本文）
+
+---
+元タイトル：{title}
+
+途中で切れた記事：
+{body}
+"""
 
 
 _DEDUP_PROMPT_TEMPLATE = """\
@@ -186,6 +217,24 @@ class Rewriter:
         )
         # The body is what readers see, so a missing title is recoverable —
         # reuse the original headline.
+        return (new_title or title), new_body
+
+    def repair_truncated(self, title: str, truncated_body: str) -> tuple[str, str]:
+        """
+        Rebuild an article that was published un-rewritten and therefore ends
+        mid-sentence. Used by regenerate_truncated.py to fix posts that are
+        already live.
+
+        Only the truncated text is available as source material, so the prompt
+        forbids inventing facts to fill the gap; the result is shorter than a
+        normal rewrite but factually bounded by what we actually have.
+        """
+        prompt = _REPAIR_PROMPT_TEMPLATE.format(
+            title=title, body=truncated_body[:_MAX_BODY_CHARS]
+        )
+        new_title, new_body = self._generate(
+            prompt, min_body_chars=_MIN_REPAIR_BODY_CHARS, label=title
+        )
         return (new_title or title), new_body
 
     def _generate(
